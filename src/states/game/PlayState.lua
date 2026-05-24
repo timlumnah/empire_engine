@@ -368,6 +368,14 @@ function PlayState:update(dt)
         return
     end
 
+-- ================== claude_changes_2026-05-23-2157 ==================
+    -- marketplace queued a business menu open
+    if self.marketplaceMenu.pendingBusinessMenu then
+        self.marketplaceMenu.pendingBusinessMenu = false
+        self.businessMenu:toggle()
+    end
+-- ====================================================================
+
     -- inventory menu
     if love.keyboard.wasPressed('i') then
         if self.inventoryMenu.active then

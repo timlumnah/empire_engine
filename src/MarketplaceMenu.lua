@@ -21,7 +21,9 @@ MarketplaceMenu = Class{}
 
 -- panel dimensions, centered on the virtual screen
 local BOX_W = 300
-local BOX_H = 180
+-- ================== claude_changes_2026-05-23-2157 ==================
+local BOX_H = 210  -- was 180; expanded to fit 3 landing buttons
+-- ====================================================================
 local BOX_X = math.floor((VIRTUAL_WIDTH - BOX_W) / 2)
 local BOX_Y = math.floor((VIRTUAL_HEIGHT - BOX_H) / 2)
 local PAD = 10
@@ -45,17 +47,21 @@ local BUYCONF_Y = math.floor((VIRTUAL_HEIGHT - BUYCONF_H) / 2)
 local BUYYES_BTN = { x = CONF_X + 20, y = BUYCONF_Y + BUYCONF_H - 20, w = 56, h = 14 }
 local BUYNO_BTN = { x = CONF_X + 124, y = BUYCONF_Y + BUYCONF_H - 20, w = 56, h = 14 }
 
--- two landing page options, their ids map to the page names used in update and render
+-- ================== claude_changes_2026-05-23-2157 ==================
+-- three landing page options; businesses signals PlayState to open businessMenu
 local LANDING_OPTIONS = {
-    { id = 'store', label = 'STORE',  desc = 'Browse & purchase items' },
-    { id = 'games', label = 'GAMES',  desc = 'Play minigames'},
+    { id = 'store',      label = 'STORE',      desc = 'Browse & purchase items' },
+    { id = 'businesses', label = 'BUSINESSES', desc = 'Manage your portfolio'   },
+    { id = 'games',      label = 'GAMES',      desc = 'Play minigames'          },
 }
 -- landing button layout
 local BTN_H = 40
 local BTN_W = BOX_W - PAD * 2 - 4
 local BTN_X = BOX_X + PAD + 2
-local BTN1_Y = BOX_Y + 48
-local BTN2_Y = BTN1_Y + BTN_H + 10
+local BTN1_Y = BOX_Y + 44
+local BTN2_Y = BTN1_Y + BTN_H + 8
+local BTN3_Y = BTN2_Y + BTN_H + 8
+-- ====================================================================
 
 -- available minigames shown on the games page
 -- id must match the folder name under minigames and the MINIGAME_DEFS key
@@ -171,6 +177,9 @@ function MarketplaceMenu:init()
     -- games page state
     self.gameSelected = 1
     self.pendingMinigame = nil  -- set when player picks a game, PlayState reads and launches it
+-- ================== claude_changes_2026-05-23-2157 ==================
+    self.pendingBusinessMenu = false  -- set when player picks businesses, PlayState opens businessMenu
+-- ====================================================================
 end
 
 -- activates the menu and builds the product list if not already built
@@ -195,6 +204,9 @@ function MarketplaceMenu:open(player)
     self.qtyRepeatTimer = 0
     self.gameSelected = 1
     self.pendingMinigame = nil
+-- ================== claude_changes_2026-05-23-2157 ==================
+    self.pendingBusinessMenu = false
+-- ====================================================================
 end
 
 -- deactivates the menu and clears the player reference
@@ -276,7 +288,15 @@ function MarketplaceMenu:updateLanding()
     elseif love.keyboard.wasPressed('down') then
         self.landingSelected = self.landingSelected < n and self.landingSelected + 1 or 1
     elseif love.keyboard.wasPressed('return') or love.keyboard.wasPressed('enter') then
-        self.page = LANDING_OPTIONS[self.landingSelected].id
+-- ================== claude_changes_2026-05-23-2157 ==================
+        local opt = LANDING_OPTIONS[self.landingSelected]
+        if opt.id == 'businesses' then
+            self.pendingBusinessMenu = true
+            self:close()
+        else
+            self.page = opt.id
+        end
+-- ====================================================================
     elseif love.keyboard.wasPressed('escape') then
         self:close()
     end
@@ -366,14 +386,22 @@ function MarketplaceMenu:mousepressed(x, y, button)
     if not self.active or button ~= 1 then return end
 
     if self.page == 'landing' then
-        local btn_ys = { BTN1_Y, BTN2_Y }
+-- ================== claude_changes_2026-05-23-2157 ==================
+        local btn_ys = { BTN1_Y, BTN2_Y, BTN3_Y }
         for i, by in ipairs(btn_ys) do
             if x >= BTN_X and x <= BTN_X + BTN_W and y >= by and y <= by + BTN_H then
                 self.landingSelected = i
-                self.page = LANDING_OPTIONS[i].id
+                local opt = LANDING_OPTIONS[i]
+                if opt.id == 'businesses' then
+                    self.pendingBusinessMenu = true
+                    self:close()
+                else
+                    self.page = opt.id
+                end
                 return
             end
         end
+-- ====================================================================
 
     elseif self.page == 'store' then
         if self.confirming then
@@ -442,11 +470,14 @@ function MarketplaceMenu:renderLanding()
     love.graphics.line(ix, BOX_Y + 38, BOX_X + BOX_W - PAD, BOX_Y + 38)
 
     -- option buttons
-    local btn_ys = { BTN1_Y, BTN2_Y }
+-- ================== claude_changes_2026-05-23-2157 ==================
+    local btn_ys = { BTN1_Y, BTN2_Y, BTN3_Y }
     local btn_colors = {
-        { bg = {0.1, 0.28, 0.12}, border = {0.3, 0.75, 0.35}, label = {0.4, 1, 0.5} },
-        { bg = {0.1, 0.18, 0.38}, border = {0.3, 0.5, 0.9},   label = {0.5, 0.75, 1} },
+        { bg = {0.1, 0.28, 0.12}, border = {0.3, 0.75, 0.35}, label = {0.4, 1, 0.5}    },  -- green  (store)
+        { bg = {0.28, 0.16, 0.05}, border = {0.85, 0.55, 0.2}, label = {1, 0.78, 0.35}  },  -- amber  (businesses)
+        { bg = {0.1, 0.18, 0.38}, border = {0.3, 0.5, 0.9},   label = {0.5, 0.75, 1}   },  -- blue   (games)
     }
+-- ====================================================================
 
     for i, opt in ipairs(LANDING_OPTIONS) do
         local by = btn_ys[i]
