@@ -96,6 +96,9 @@ end
 local function build_product_list()
     local list = {}
     for productKey, product in pairs(PRODUCTS) do
+        -- ================== claude_changes_2026-05-25-1228 ==================
+        if product.playerBuyable ~= false then
+        -- ====================================================================
         for _, vendorKey in ipairs(product.vendors) do
             local vendor = VENDORS[vendorKey]
             if vendor then
@@ -114,6 +117,9 @@ local function build_product_list()
                 }
             end
         end
+        -- ================== claude_changes_2026-05-25-1228 ==================
+        end
+        -- ====================================================================
     end
     -- sort by type first so food and beverage group together, alphabetically within each type
     table.sort(list, function(a, b)
@@ -180,6 +186,17 @@ function MarketplaceMenu:init()
 -- ================== claude_changes_2026-05-23-2157 ==================
     self.pendingBusinessMenu = false  -- set when player picks businesses, PlayState opens businessMenu
 -- ====================================================================
+-- ================== claude_changes_2026-05-25-1228 ==================
+    self.storeTab = 'personal'      -- 'personal' or 'wholesale'
+    self.wholesaleBusIdx = 1        -- index into player's retail business list
+    self.wholesaleQty = 100         -- units to order
+    self.wholesaleConfirm = false
+    self.wQtyRepeatDir = 0
+    self.wQtyRepeatTimer = 0
+-- ====================================================================
+-- ================== claude_changes_2026-05-25-1330 ==================
+    self.wholesaleRow = 1           -- active row: 1=business, 2=qty, 3=toggle, 4=threshold, 5=reorder%
+-- ====================================================================
 end
 
 -- activates the menu and builds the product list if not already built
@@ -207,6 +224,17 @@ function MarketplaceMenu:open(player)
 -- ================== claude_changes_2026-05-23-2157 ==================
     self.pendingBusinessMenu = false
 -- ====================================================================
+-- ================== claude_changes_2026-05-25-1228 ==================
+    self.storeTab = 'personal'
+    self.wholesaleBusIdx = 1
+    self.wholesaleQty = 100
+    self.wholesaleConfirm = false
+    self.wQtyRepeatDir = 0
+    self.wQtyRepeatTimer = 0
+-- ====================================================================
+-- ================== claude_changes_2026-05-25-1330 ==================
+    self.wholesaleRow = 1
+-- ====================================================================
 end
 
 -- deactivates the menu and clears the player reference
@@ -214,6 +242,26 @@ function MarketplaceMenu:close()
     self.active = false
     self.player = nil
 end
+
+-- ================== claude_changes_2026-05-25-1330 ==================
+-- open directly into wholesale mode pre-selected to targetBus (called from BusinessMenu W key)
+function MarketplaceMenu:openWholesaleFor(player, targetBus)
+    self:open(player)
+    self.page     = 'store'
+    self.storeTab = 'wholesale'
+    -- find targetBus position in the retail list
+    local idx = 1
+    local i   = 0
+    for _, b in ipairs(player.businesses or {}) do
+        if b.type == 'retail' then
+            i = i + 1
+            if b == targetBus then idx = i; break end
+        end
+    end
+    self.wholesaleBusIdx = idx
+    self.wholesaleRow    = 2  -- start on the qty row so player can act immediately
+end
+-- ====================================================================
 
 
 function MarketplaceMenu:showError(msg)
@@ -304,6 +352,12 @@ end
 
 -- handles store page input including the buy confirm dialog with qty selection
 function MarketplaceMenu:updateStore(dt)
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    if self.storeTab == 'wholesale' then
+        self:updateWholesale(dt)
+        return
+    end
+    -- ====================================================================
     if self.confirming then
         -- hold to repeat qty adjustment: first press fires immediately
         -- then 0.30 second delay before repeating every 0.07 seconds
@@ -364,6 +418,18 @@ function MarketplaceMenu:updateStore(dt)
         self:promptBuy(self.selected)
     elseif love.keyboard.wasPressed('escape') then
         self.page = 'landing'
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    elseif love.keyboard.wasPressed('w') then
+        for _, b in ipairs(self.player.businesses or {}) do
+            if b.type == 'retail' then
+                self.storeTab = 'wholesale'
+                self.wholesaleBusIdx = 1
+                self.wholesaleQty = 100
+                self.wholesaleConfirm = false
+                break
+            end
+        end
+    -- ====================================================================
     end
 end
 
@@ -381,6 +447,159 @@ function MarketplaceMenu:updateGames()
     end
 end
 
+
+-- ================== claude_changes_2026-05-25-1228 ==================
+-- returns all retail businesses in player.businesses (or empty table)
+local function get_retail_businesses(player)
+    local list = {}
+    for _, b in ipairs(player.businesses or {}) do
+        if b.type == 'retail' then list[#list+1] = b end
+    end
+    return list
+end
+
+-- ================== claude_changes_2026-05-25-1330 ==================
+function MarketplaceMenu:updateWholesale(dt)
+    local retails = get_retail_businesses(self.player)
+    if #retails == 0 then self.storeTab = 'personal'; return end
+
+    self.wholesaleBusIdx = math.max(1, math.min(#retails, self.wholesaleBusIdx))
+    local bus = retails[self.wholesaleBusIdx]
+    local cap = math.max(0, (bus.maxStock or 5000) - (bus.stockLevel or 0))
+
+    -- confirm overlay intercepts all input while open
+    if self.wholesaleConfirm then
+        local dir = 0
+        if love.keyboard.isDown('left') then dir = -1
+        elseif love.keyboard.isDown('right') then dir = 1
+        end
+        if dir ~= self.wQtyRepeatDir then
+            self.wQtyRepeatDir = dir
+            if dir ~= 0 then
+                self.wholesaleQty = math.max(1, math.min(cap, self.wholesaleQty + dir * 10))
+                self.wQtyRepeatTimer = -0.30
+            else
+                self.wQtyRepeatTimer = 0
+            end
+        elseif dir ~= 0 then
+            self.wQtyRepeatTimer = self.wQtyRepeatTimer + dt
+            while self.wQtyRepeatTimer >= 0.07 do
+                self.wQtyRepeatTimer = self.wQtyRepeatTimer - 0.07
+                self.wholesaleQty = math.max(1, math.min(cap, self.wholesaleQty + dir * 10))
+            end
+        end
+        if love.keyboard.wasPressed('return') or love.keyboard.wasPressed('enter')
+           or love.keyboard.wasPressed('y') then
+            self:buyWholesale(bus, self.wholesaleQty)
+        elseif love.keyboard.wasPressed('escape') or love.keyboard.wasPressed('n') then
+            self.wholesaleConfirm = false
+        end
+        return
+    end
+
+    -- clamp active row to valid range (auto-reorder rows only when enabled)
+    local maxRow = bus.autoReorderEnabled and 5 or 3
+    self.wholesaleRow = math.max(1, math.min(maxRow, self.wholesaleRow))
+
+    -- ESC / W: back to personal tab
+    if love.keyboard.wasPressed('escape') or love.keyboard.wasPressed('w') then
+        self.storeTab = 'personal'; return
+    end
+
+    -- up/down: navigate rows
+    if love.keyboard.wasPressed('up') then
+        self.wholesaleRow = math.max(1, self.wholesaleRow - 1)
+        self.wQtyRepeatDir = 0; self.wQtyRepeatTimer = 0
+    elseif love.keyboard.wasPressed('down') then
+        self.wholesaleRow = math.min(maxRow, self.wholesaleRow + 1)
+        self.wQtyRepeatDir = 0; self.wQtyRepeatTimer = 0
+    end
+
+    local row = self.wholesaleRow
+
+    if row == 1 then
+        -- left/right: switch which retail business to restock
+        if love.keyboard.wasPressed('left') then
+            self.wholesaleBusIdx = math.max(1, self.wholesaleBusIdx - 1)
+            self.wholesaleQty = math.min(100, math.max(1, cap))
+        elseif love.keyboard.wasPressed('right') then
+            self.wholesaleBusIdx = math.min(#retails, self.wholesaleBusIdx + 1)
+            self.wholesaleQty = math.min(100, math.max(1, cap))
+        end
+
+    elseif row == 2 then
+        -- left/right: adjust qty (hold to repeat); enter: open buy confirm
+        local dir = 0
+        if love.keyboard.isDown('left') then dir = -1
+        elseif love.keyboard.isDown('right') then dir = 1
+        end
+        if dir ~= self.wQtyRepeatDir then
+            self.wQtyRepeatDir = dir
+            if dir ~= 0 then
+                self.wholesaleQty = math.max(1, math.min(math.max(1, cap), self.wholesaleQty + dir * 10))
+                self.wQtyRepeatTimer = -0.30
+            else
+                self.wQtyRepeatTimer = 0
+            end
+        elseif dir ~= 0 then
+            self.wQtyRepeatTimer = self.wQtyRepeatTimer + dt
+            while self.wQtyRepeatTimer >= 0.07 do
+                self.wQtyRepeatTimer = self.wQtyRepeatTimer - 0.07
+                self.wholesaleQty = math.max(1, math.min(math.max(1, cap), self.wholesaleQty + dir * 10))
+            end
+        end
+        if love.keyboard.wasPressed('return') or love.keyboard.wasPressed('enter') then
+            if cap > 0 then
+                self.wholesaleQty = math.max(1, math.min(cap, self.wholesaleQty))
+                self.wholesaleConfirm = true
+            end
+        end
+
+    elseif row == 3 then
+        -- left/right or enter: toggle auto-reorder on/off
+        if love.keyboard.wasPressed('left') or love.keyboard.wasPressed('right')
+           or love.keyboard.wasPressed('return') or love.keyboard.wasPressed('enter') then
+            bus.autoReorderEnabled = not bus.autoReorderEnabled
+            if not bus.autoReorderEnabled then
+                self.wholesaleRow = math.min(3, self.wholesaleRow)
+            end
+        end
+
+    elseif row == 4 then
+        -- left/right: adjust trigger threshold in 5% steps (5% to 50%)
+        if love.keyboard.wasPressed('left') then
+            bus.autoReorderThreshold = math.max(0.05, (bus.autoReorderThreshold or 0.10) - 0.05)
+        elseif love.keyboard.wasPressed('right') then
+            bus.autoReorderThreshold = math.min(0.50, (bus.autoReorderThreshold or 0.10) + 0.05)
+        end
+
+    elseif row == 5 then
+        -- left/right: adjust reorder quantity in 5% steps (10% to 100%)
+        if love.keyboard.wasPressed('left') then
+            bus.autoReorderQuantity = math.max(0.10, (bus.autoReorderQuantity or 0.50) - 0.05)
+        elseif love.keyboard.wasPressed('right') then
+            bus.autoReorderQuantity = math.min(1.00, (bus.autoReorderQuantity or 0.50) + 0.05)
+        end
+    end
+end
+-- ====================================================================
+
+function MarketplaceMenu:buyWholesale(bus, qty)
+    local unitCost = bus.unitWholeSaleCost or 4
+    local total = qty * unitCost
+    if self.player.cash < total then
+        self.wholesaleConfirm = false
+        self:showError('not enough cash')
+        self.storeTab = 'personal'
+        return
+    end
+    self.player.cash = self.player.cash - total
+    self.player.displayCash = self.player.cash
+    bus.stockLevel = math.min((bus.stockLevel or 0) + qty, bus.maxStock or 5000)
+    self.wholesaleConfirm = false
+    self:close()
+end
+-- ====================================================================
 
 function MarketplaceMenu:mousepressed(x, y, button)
     if not self.active or button ~= 1 then return end
@@ -404,6 +623,20 @@ function MarketplaceMenu:mousepressed(x, y, button)
 -- ====================================================================
 
     elseif self.page == 'store' then
+        -- ================== claude_changes_2026-05-25-1228 ==================
+        if self.storeTab == 'wholesale' then
+            if self.wholesaleConfirm then
+                local retails = get_retail_businesses(self.player)
+                local bus = retails[math.max(1, math.min(#retails, self.wholesaleBusIdx))]
+                if bus and hit(YES_BTN, x, y) then
+                    self:buyWholesale(bus, self.wholesaleQty)
+                elseif hit(NO_BTN, x, y) then
+                    self.wholesaleConfirm = false
+                end
+            end
+            return
+        end
+        -- ====================================================================
         if self.confirming then
             if hit(BUYYES_BTN, x, y) then
                 self:buy(self.pendingBuyIdx, self.buyQty)
@@ -518,6 +751,12 @@ function MarketplaceMenu:renderLanding()
 end
 
 function MarketplaceMenu:renderStore()
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    if self.storeTab == 'wholesale' then
+        self:renderWholesale()
+        return
+    end
+    -- ====================================================================
     render_panel()
 
     local ix = BOX_X + PAD
@@ -609,9 +848,18 @@ function MarketplaceMenu:renderStore()
         love.graphics.setFont(gFonts['small'])
         love.graphics.printf(self.errMsg, ix, footY, iw, 'center')
     else
+        -- ================== claude_changes_2026-05-25-1228 ==================
+        local hasRetail = false
+        for _, b in ipairs(self.player.businesses or {}) do
+            if b.type == 'retail' then hasRetail = true; break end
+        end
+        local footHint = hasRetail
+            and '[UP/DN] scroll  [ENTER] buy  [W] wholesale  [ESC] back'
+            or  '[UP/DN] scroll   [ENTER] buy   [ESC] back'
+        -- ====================================================================
         set(0.35, 0.35, 0.35, 1)
         love.graphics.setFont(gFonts['small'])
-        love.graphics.printf('[UP/DN] scroll   [ENTER] buy   [ESC] back', ix, footY, iw, 'center')
+        love.graphics.printf(footHint, ix, footY, iw, 'center')
     end
 
     if self.confirming then self:renderBuyConfirm() end
@@ -673,6 +921,212 @@ function MarketplaceMenu:renderBuyConfirm()
 
     set(1, 1, 1, 1)
 end
+
+-- ================== claude_changes_2026-05-25-1228 ==================
+function MarketplaceMenu:renderWholesale()
+    render_panel()
+
+    local ix = BOX_X + PAD
+    local iw = BOX_W - PAD * 2
+
+    -- title + back hint
+    love.graphics.setFont(gFonts['gothic-medium'])
+    set(1, 0.78, 0.35, 1)
+    love.graphics.print('WHOLESALE', ix, BOX_Y + 6)
+
+    love.graphics.setFont(gFonts['small'])
+    set(0.35, 0.35, 0.35, 1)
+    local backHint = '[W/ESC] back'
+    love.graphics.print(backHint, BOX_X + BOX_W - PAD - gFonts['small']:getWidth(backHint), BOX_Y + 8)
+
+    -- player cash
+    local cashStr = string.format('$%.0f', self.player.cash)
+    local cashW = gFonts['small']:getWidth(cashStr)
+    if self.player.cash < 0 then set(1, 0.4, 0.4, 1) else set(0.5, 1, 0.5, 1) end
+    love.graphics.print(cashStr, BOX_X + BOX_W - PAD - cashW, BOX_Y + 20)
+
+    set(1, 1, 1, 0.2)
+    love.graphics.line(ix, BOX_Y + 34, BOX_X + BOX_W - PAD, BOX_Y + 34)
+
+    local retails = get_retail_businesses(self.player)
+    if #retails == 0 then
+        love.graphics.setFont(gFonts['small'])
+        set(0.5, 0.5, 0.5, 1)
+        love.graphics.printf('No retail businesses owned.', ix, BOX_Y + 80, iw, 'center')
+        set(1, 1, 1, 1)
+        return
+    end
+
+    self.wholesaleBusIdx = math.max(1, math.min(#retails, self.wholesaleBusIdx))
+    local bus = retails[self.wholesaleBusIdx]
+    local stock    = bus.stockLevel or 0
+    local maxStock = bus.maxStock   or 5000
+    local cap      = math.max(0, maxStock - stock)
+    local unitCost = bus.unitWholeSaleCost or 4
+    local row      = self.wholesaleRow
+
+    -- row 1: business selector
+    local r1y = BOX_Y + 42
+    love.graphics.setFont(gFonts['small'])
+    if row == 1 then set(1, 0.95, 0.55, 1) else set(0.55, 0.55, 0.55, 1) end
+    love.graphics.print((row == 1 and '> ' or '  ') .. 'Restocking:', ix, r1y)
+
+    local busLabel = (bus.displayName or bus.type)
+    if #retails > 1 then
+        busLabel = string.format('< %s (%d/%d) >', busLabel, self.wholesaleBusIdx, #retails)
+        if row == 1 then set(1, 1, 1, 1) else set(0.75, 0.75, 0.6, 1) end
+    else
+        set(0.9, 0.9, 0.75, 1)
+    end
+    love.graphics.setFont(gFonts['gothic-medium'])
+    love.graphics.printf(busLabel, ix, r1y, iw, 'right')
+
+    -- stock level row (display only, not selectable)
+    local r_stock_y = r1y + 16
+    love.graphics.setFont(gFonts['small'])
+    set(0.45, 0.45, 0.45, 1)
+    love.graphics.print('Stock:', ix, r_stock_y)
+    local stockColor = stock / maxStock > 0.5 and {0.4, 1, 0.4} or
+                       stock / maxStock > 0.15 and {1, 0.85, 0.3} or {1, 0.4, 0.4}
+    set(stockColor[1], stockColor[2], stockColor[3], 1)
+    love.graphics.printf(string.format('%d / %d', stock, maxStock), ix, r_stock_y, iw, 'right')
+
+    -- stock progress bar
+    local barW = iw
+    local barH = 6
+    local barY = r_stock_y + 14
+    set(0.15, 0.15, 0.15, 1)
+    love.graphics.rectangle('fill', ix, barY, barW, barH, 2)
+    local fillW = math.floor(barW * (stock / maxStock))
+    set(stockColor[1], stockColor[2], stockColor[3], 0.85)
+    if fillW > 0 then love.graphics.rectangle('fill', ix, barY, fillW, barH, 2) end
+    set(0.4, 0.4, 0.4, 1)
+    love.graphics.rectangle('line', ix, barY, barW, barH, 2)
+
+    set(1, 1, 1, 0.15)
+    love.graphics.line(ix, barY + 10, BOX_X + BOX_W - PAD, barY + 10)
+
+    -- row 2: manual order qty
+    local r2y = barY + 18
+    love.graphics.setFont(gFonts['small'])
+    if row == 2 then set(1, 0.95, 0.55, 1) else set(0.55, 0.55, 0.55, 1) end
+    love.graphics.print((row == 2 and '> ' or '  ') .. 'Order Qty:', ix, r2y)
+
+    if cap == 0 then
+        set(0.45, 0.45, 0.45, 1)
+        love.graphics.printf('FULL', ix, r2y, iw, 'right')
+    else
+        local qty = self.wholesaleQty
+        if row == 2 then set(0.6, 0.6, 0.6, 1) else set(0.4, 0.4, 0.4, 1) end
+        love.graphics.printf('<', ix, r2y, iw - 30, 'right')
+        love.graphics.printf('>', ix + 30, r2y, iw - 30, 'right')
+        if row == 2 then set(1, 1, 0.8, 1) else set(0.8, 0.8, 0.65, 1) end
+        love.graphics.setFont(gFonts['gothic-medium'])
+        love.graphics.printf(tostring(qty), ix, r2y, iw, 'right')
+
+        love.graphics.setFont(gFonts['small'])
+        set(0.4, 0.4, 0.45, 1)
+        love.graphics.print(string.format('$%d/unit', unitCost), ix, r2y + 12)
+        local total = qty * unitCost
+        local canAfford = self.player.cash >= total
+        if canAfford then set(0.4, 1, 0.4, 1) else set(1, 0.35, 0.35, 1) end
+        love.graphics.printf(string.format('Total: $%d', total), ix, r2y + 12, iw, 'right')
+    end
+
+    set(1, 1, 1, 0.15)
+    local divY = r2y + 26
+    love.graphics.line(ix, divY, BOX_X + BOX_W - PAD, divY)
+
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    -- auto-reorder section (rows 3-5)
+    local arY = divY + 6  -- top of auto-reorder section
+
+    -- row 3: enable / disable toggle
+    local r3y = arY
+    love.graphics.setFont(gFonts['small'])
+    if row == 3 then set(1, 0.95, 0.55, 1) else set(0.55, 0.55, 0.55, 1) end
+    love.graphics.print((row == 3 and '> ' or '  ') .. 'Auto-reorder:', ix, r3y)
+
+    if bus.autoReorderEnabled then
+        set(0.3, 1, 0.45, 1)
+        love.graphics.printf('[ON]', ix, r3y, iw, 'right')
+    else
+        set(0.5, 0.5, 0.5, 1)
+        love.graphics.printf('[OFF]', ix, r3y, iw, 'right')
+    end
+
+    -- rows 4 and 5: threshold and qty (dimmed when auto-reorder is off)
+    local enabled = bus.autoReorderEnabled
+    local dimAlpha = enabled and 1 or 0.35
+
+    -- row 4: trigger threshold %
+    local r4y = r3y + 13
+    local thrPct = math.floor((bus.autoReorderThreshold or 0.10) * 100 + 0.5)
+    local thrUnits = math.floor(maxStock * (bus.autoReorderThreshold or 0.10))
+    if row == 4 and enabled then set(1, 0.95, 0.55, 1)
+    else set(0.55 * dimAlpha, 0.55 * dimAlpha, 0.55 * dimAlpha, 1) end
+    love.graphics.print((row == 4 and enabled and '> ' or '  ') .. 'Trigger at:', ix, r4y)
+    if enabled then
+        if row == 4 then set(0.6, 0.6, 0.6, 1) else set(0.35, 0.35, 0.35, 1) end
+        love.graphics.printf('<', ix, r4y, iw - 60, 'right')
+        love.graphics.printf('>', ix + 30, r4y, iw - 60, 'right')
+    end
+    if row == 4 and enabled then set(1, 1, 0.8, 1) else set(0.7 * dimAlpha, 0.7 * dimAlpha, 0.55 * dimAlpha, 1) end
+    love.graphics.printf(string.format('%d%%  (%d units)', thrPct, thrUnits), ix, r4y, iw, 'right')
+
+    -- row 5: reorder quantity %
+    local r5y = r4y + 13
+    local buyPct = math.floor((bus.autoReorderQuantity or 0.50) * 100 + 0.5)
+    local buyUnits = math.floor(maxStock * (bus.autoReorderQuantity or 0.50))
+    if row == 5 and enabled then set(1, 0.95, 0.55, 1)
+    else set(0.55 * dimAlpha, 0.55 * dimAlpha, 0.55 * dimAlpha, 1) end
+    love.graphics.print((row == 5 and enabled and '> ' or '  ') .. 'Reorder qty:', ix, r5y)
+    if enabled then
+        if row == 5 then set(0.6, 0.6, 0.6, 1) else set(0.35, 0.35, 0.35, 1) end
+        love.graphics.printf('<', ix, r5y, iw - 60, 'right')
+        love.graphics.printf('>', ix + 30, r5y, iw - 60, 'right')
+    end
+    if row == 5 and enabled then set(1, 1, 0.8, 1) else set(0.7 * dimAlpha, 0.7 * dimAlpha, 0.55 * dimAlpha, 1) end
+    love.graphics.printf(string.format('%d%%  (%d units)', buyPct, buyUnits), ix, r5y, iw, 'right')
+    -- ====================================================================
+
+    -- footer
+    set(0.35, 0.35, 0.35, 1)
+    love.graphics.setFont(gFonts['small'])
+    love.graphics.printf('[UP/DN] row   [LFT/RT] adjust   [ENTER] buy   [W/ESC] back',
+        ix, BOX_Y + BOX_H - 12, iw, 'center')
+
+    -- wholesale confirm overlay
+    if self.wholesaleConfirm then
+        local qty   = self.wholesaleQty
+        local total = qty * unitCost
+        local msg   = string.format('Buy %d units of stock?\nCost: $%d', qty, total)
+        love.graphics.setColor(0, 0, 0, 0.55)
+        love.graphics.rectangle('fill', 0, 0, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)
+        set(0.08, 0.08, 0.13, 0.97)
+        love.graphics.rectangle('fill', CONF_X, CONF_Y, CONF_W, CONF_H, 4)
+        set(0.7, 0.6, 0.2, 1)
+        love.graphics.rectangle('line', CONF_X, CONF_Y, CONF_W, CONF_H, 4)
+        love.graphics.setFont(gFonts['small'])
+        set(1, 1, 1, 1)
+        love.graphics.printf(msg, CONF_X + 8, CONF_Y + 8, CONF_W - 16, 'center')
+        set(0.15, 0.45, 0.15, 1)
+        love.graphics.rectangle('fill', YES_BTN.x, YES_BTN.y, YES_BTN.w, YES_BTN.h, 3)
+        set(0.4, 1, 0.4, 1)
+        love.graphics.rectangle('line', YES_BTN.x, YES_BTN.y, YES_BTN.w, YES_BTN.h, 3)
+        set(1, 1, 1, 1)
+        love.graphics.printf('YES', YES_BTN.x, YES_BTN.y + 3, YES_BTN.w, 'center')
+        set(0.45, 0.1, 0.1, 1)
+        love.graphics.rectangle('fill', NO_BTN.x, NO_BTN.y, NO_BTN.w, NO_BTN.h, 3)
+        set(1, 0.35, 0.35, 1)
+        love.graphics.rectangle('line', NO_BTN.x, NO_BTN.y, NO_BTN.w, NO_BTN.h, 3)
+        set(1, 1, 1, 1)
+        love.graphics.printf('NO', NO_BTN.x, NO_BTN.y + 3, NO_BTN.w, 'center')
+    end
+
+    set(1, 1, 1, 1)
+end
+-- ====================================================================
 
 function MarketplaceMenu:renderGames()
     render_panel()

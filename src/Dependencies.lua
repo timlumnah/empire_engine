@@ -35,6 +35,13 @@ require 'src.BusinessMenu'
 require 'src.BusinessOpenMenu'
 require 'src.LoanMenu'
 require 'src.PauseMenu'
+-- ================== claude_changes_2026-05-25-1228 ==================
+require 'src.EmployeeMenu'
+-- ====================================================================
+-- ================== claude_changes_2026-05-25-1330 ==================
+require 'src.EquipmentMenu'
+require 'src.ChecklistMenu'
+-- ====================================================================
 require 'src.Market'
 
 require 'src.defs.object_defs'
@@ -48,6 +55,12 @@ require 'src.defs.products'
 require 'src.defs.vendors'
 require 'src.defs.minigame_defs'
 require 'src.defs.shmooze_defs'
+-- ================== claude_changes_2026-05-25-1228 ==================
+require 'src.defs.employee_defs'
+-- ====================================================================
+-- ================== claude_changes_2026-05-25-1330 ==================
+require 'src.defs.equipment_defs'
+-- ====================================================================
 
 require 'src.MarketplaceMenu'
 require 'src.NpcMenu'

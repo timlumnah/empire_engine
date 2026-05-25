@@ -82,6 +82,27 @@ function Business:init(def)
     self.cash = -self.startupCost
     self.age = 0                -- age in real seconds, converted to months for display
     self.in_remove_queue = false -- flag for future removal, not currently used
+
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- scale tier: 1 = normal, 2 = large, 3 = enterprise
+    -- scaleTiers defined per type in business_defs; capacity multiplied by tier mult
+    self.scaleTier = self.scaleTier or 1
+    self.maxEmployees = self.maxEmployees or 5
+    -- retail stock; nil on non-retail types (checked before use in update)
+    if self.stockLevel == nil and def.stockLevel ~= nil then
+        self.stockLevel = def.stockLevel
+    end
+    self.maxStock = self.maxStock or nil
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    -- auto-reorder: fires once when stock drops to or below threshold, re-arms when stock recovers
+    self.autoReorderEnabled   = (def.autoReorderEnabled ~= nil) and def.autoReorderEnabled or false
+    self.autoReorderThreshold = self.autoReorderThreshold or 0.10
+    self.autoReorderQuantity  = self.autoReorderQuantity  or 0.50
+    self.reorderArmed         = true  -- false after a reorder fires; reset when stock recovers
+    -- equipment: one-time purchases tracked as { key = count }; never consumed
+    self.equipment = self.equipment or {}
+    -- ====================================================================
 end
 
 -- resolves a callback field from a def
@@ -132,7 +153,16 @@ function Business:update(dt, market, context)
         * (1 + (math.random() - 0.5) * self.risk) -- random shock scaled by risk value
 
     -- clamp to demandBase so buisness never sells more than teh capacity allows
-    local quantitySold = math.min(demand, demandBase) * dt
+    local rawSold = math.min(demand, demandBase) * dt
+
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- retail businesses cap sales by physical stock on hand
+    local quantitySold = rawSold
+    if self.stockLevel ~= nil then
+        quantitySold = math.min(rawSold, self.stockLevel)
+        self.stockLevel = math.max(0, self.stockLevel - quantitySold)
+    end
+    -- ====================================================================
 
     -- revenue is units sold times base price, biome price multiplier applied on top
     local revenue = quantitySold * self.basePrice * priceMult
@@ -143,10 +173,12 @@ function Business:update(dt, market, context)
     local fixedCostsPerSecond = self.fixedCosts / SECONDS_PER_MONTH
     local totalCosts = unitWholeSaleAquisitionCosts + (fixedCostsPerSecond * dt)
 
-    -- add each employees salary prorated to this frame
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- salary is monthly; prorate to this frame's dt
     for _, e in ipairs(self.employees) do
-        totalCosts = totalCosts + e.salary * dt
+        totalCosts = totalCosts + (e.salary / SECONDS_PER_MONTH) * dt
     end
+    -- ====================================================================
 
     local profit = revenue - totalCosts
     self.cash = self.cash + profit -- accumulate profit into the buisness cash balance
@@ -223,14 +255,83 @@ function Business:calculateDemand(market)
     return demand
 end
 
--- returns total capacity including bonus from any hired employees
--- employees add productivity * 10 to the base capacity
+-- returns total capacity including scale tier multiplier, employee bonuses, and opMult
 function Business:getEffectiveCapacity()
-    local extraCapacity = 0
-    for _, e in ipairs(self.employees) do
-        extraCapacity = extraCapacity + e.productivity * 10  -- arbitrary scalling factor
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- scale tier multiplier applied first (1.0 / 1.5 / 2.5)
+    local tierMult = 1.0
+    if self.scaleTiers and self.scaleTier then
+        local tier = self.scaleTiers[self.scaleTier]
+        if tier then tierMult = tier.mult end
     end
-    return self.capacity + extraCapacity
+    local base = self.capacity * tierMult
+
+    -- each employee adds their role's capacityBonus
+    local extra = 0
+    for _, e in ipairs(self.employees) do
+        extra = extra + (e.capacityBonus or (e.productivity and e.productivity * 10) or 0)
+    end
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    -- opMult from requirements checklist (0.10 floor when REQUIRED unmet, up to 1.40 with BONUS)
+    return (base + extra) * self:getOpMult()
+    -- ====================================================================
+end
+
+-- returns a flat list of requirement check results for the requirements checklist
+-- each entry: { id, label, tier, met, key, minCount }
+function Business:getChecklistStatus()
+    if not self.requirements then return {} end
+    local status = {}
+    for _, req in ipairs(self.requirements) do
+        local met = false
+        if req.type == 'equipment' then
+            local count = (self.equipment and self.equipment[req.key]) or 0
+            met = count >= (req.minCount or 1)
+        elseif req.type == 'employee' then
+            local count = 0
+            for _, e in ipairs(self.employees) do
+                if e.role == req.key then count = count + 1 end
+            end
+            met = count >= (req.minCount or 1)
+        elseif req.type == 'stock' then
+            met = self.stockLevel ~= nil and self.stockLevel > 0
+        end
+        table.insert(status, {
+            id       = req.id,
+            label    = req.label,
+            tier     = req.tier,
+            met      = met,
+            key      = req.key,
+            minCount = req.minCount,
+        })
+    end
+    return status
+end
+
+-- returns the operational multiplier based on the requirements checklist
+-- 0.10 if any REQUIRED unmet; 0.60 baseline; scales to 1.00 with RECOMMENDED; 1.40 with BONUS
+function Business:getOpMult()
+    if not self.requirements or #self.requirements == 0 then return 1.0 end
+    local status   = self:getChecklistStatus()
+    local reqMet   = true
+    local recTotal, recMet = 0, 0
+    local bonTotal, bonMet = 0, 0
+    for _, item in ipairs(status) do
+        if item.tier == 'required' and not item.met then
+            reqMet = false
+        elseif item.tier == 'recommended' then
+            recTotal = recTotal + 1
+            if item.met then recMet = recMet + 1 end
+        elseif item.tier == 'bonus' then
+            bonTotal = bonTotal + 1
+            if item.met then bonMet = bonMet + 1 end
+        end
+    end
+    if not reqMet then return 0.10 end
+    local recPct = recTotal > 0 and (recMet / recTotal) or 1.0
+    local bonPct = bonTotal > 0 and (bonMet / bonTotal) or 0.0
+    return math.min(1.40, 0.60 + recPct * 0.40 + bonPct * 0.40)
 end
 
 -- returns the effective reputation including employee and parent company bonuses
@@ -263,5 +364,148 @@ function Business:getPriceModifier()
     return 1.0 + (self.reputation - 1.0) * 0.2
 end
 
+
+-- ================== claude_changes_2026-05-25-1228 ==================
+
+-- hire a new employee; role is a key from EMPLOYEE_ROLES
+-- returns the new employee table or nil if business is at max capacity
+function Business:hireEmployee(role)
+    local max = self.maxEmployees or 5
+    if #self.employees >= max then return nil end
+    local roleDef = EMPLOYEE_ROLES and EMPLOYEE_ROLES[role]
+    if not roleDef then return nil end
+
+    -- enforce allowedTypes so wrong-type roles can't be hired
+    if roleDef.allowedTypes then
+        local allowed = false
+        for _, t in ipairs(roleDef.allowedTypes) do
+            if t == self.type then allowed = true; break end
+        end
+        if not allowed then return nil end
+    end
+
+    local pool = EMPLOYEE_NAME_POOL or {'Worker'}
+    local name = pool[math.random(#pool)]
+    local lo, hi = roleDef.salaryRange[1], roleDef.salaryRange[2]
+    local salary = math.random(lo, hi)
+
+    local emp = {
+        name         = name,
+        role         = role,
+        salary       = salary,
+        capacityBonus = roleDef.capacityBonus,
+    }
+    table.insert(self.employees, emp)
+    return emp
+end
+
+-- fire employee at position index in self.employees
+function Business:fireEmployee(index)
+    if index >= 1 and index <= #self.employees then
+        table.remove(self.employees, index)
+    end
+end
+
+-- total monthly payroll across all employees
+function Business:getMonthlyPayroll()
+    local total = 0
+    for _, e in ipairs(self.employees) do
+        total = total + (e.salary or 0)
+    end
+    return total
+end
+
+-- returns true if the business can be scaled up (tier < 3) and player has cash
+function Business:canScale(playerCash)
+    if not self.scaleTiers then return false end
+    local nextTier = (self.scaleTier or 1) + 1
+    local tierDef = self.scaleTiers[nextTier]
+    if not tierDef then return false end
+    return playerCash >= tierDef.cost
+end
+
+-- returns the cost and mult for the next scale tier, or nil if maxed
+function Business:nextScaleInfo()
+    if not self.scaleTiers then return nil end
+    local nextTier = (self.scaleTier or 1) + 1
+    return self.scaleTiers[nextTier]
+end
+
+-- upgrade to the next scale tier; deduct cost from playerCash (passed as table ref)
+-- returns true on success
+function Business:doScale(player)
+    local info = self:nextScaleInfo()
+    if not info or player.cash < info.cost then return false end
+    player.cash = player.cash - info.cost
+    player.displayCash = player.cash
+    self.scaleTier = (self.scaleTier or 1) + 1
+    return true
+end
+
+-- merge another business of the same type into this one; other is removed by caller
+-- combined capacity, cash, averaged reputation, employees up to maxEmployees
+function Business:mergeWith(other)
+    -- capacity: take the higher base capacity of the two then add a merge bonus
+    local myEff  = self.capacity  * ((self.scaleTiers  and self.scaleTiers[self.scaleTier  or 1] and self.scaleTiers[self.scaleTier  or 1].mult) or 1.0)
+    local othEff = other.capacity * ((other.scaleTiers and other.scaleTiers[other.scaleTier or 1] and other.scaleTiers[other.scaleTier or 1].mult) or 1.0)
+    self.capacity = math.floor(math.max(myEff, othEff) * 1.4)
+    self.scaleTier = 1              -- reset tier; new capacity already baked in
+    self.scaleTiers = nil           -- no further tier scaling after a merge
+
+    -- cash: combine balances
+    self.cash = self.cash + other.cash
+
+    -- reputation: weighted average
+    self.reputation = (self.reputation + other.reputation) / 2
+
+    -- absorb employees up to maxEmployees
+    local max = self.maxEmployees or 5
+    for _, e in ipairs(other.employees or {}) do
+        if #self.employees < max then
+            table.insert(self.employees, e)
+        end
+    end
+
+    -- absorb retail stock if applicable
+    if self.stockLevel ~= nil and other.stockLevel ~= nil then
+        local cap = self.maxStock or 9999999
+        self.stockLevel = math.min(self.stockLevel + other.stockLevel, cap)
+    end
+end
+
+-- ================== claude_changes_2026-05-25-1330 ==================
+-- fires once when stock drops to or below the threshold fraction of maxStock
+-- re-arms automatically when stock recovers above the threshold
+-- returns a display string on successful reorder, nil otherwise
+function Business:checkAutoReorder(player)
+    if not self.autoReorderEnabled then return nil end
+    if self.stockLevel == nil then return nil end
+
+    local maxS        = self.maxStock or 5000
+    local triggerAmt  = math.floor(maxS * (self.autoReorderThreshold or 0.10))
+    local reorderQty  = math.floor(maxS * (self.autoReorderQuantity  or 0.50))
+
+    -- re-arm when stock climbs back above the threshold
+    if self.stockLevel > triggerAmt then
+        self.reorderArmed = true
+        return nil
+    end
+
+    -- at or below threshold but already fired this depletion cycle
+    if not self.reorderArmed then return nil end
+
+    -- fire the reorder
+    local unitCost  = self.unitWholeSaleCost or 4
+    local totalCost = reorderQty * unitCost
+    if player.cash < totalCost then return nil end  -- can't afford; skip silently
+
+    player.cash          = player.cash - totalCost
+    player.displayCash   = player.cash
+    self.stockLevel      = math.min((self.stockLevel or 0) + reorderQty, maxS)
+    self.reorderArmed    = false  -- disarm until stock recovers above threshold
+
+    return string.format('Auto-restocked: +%d units  ($%d)', reorderQty, totalCost)
+end
+-- ====================================================================
 
 return Business

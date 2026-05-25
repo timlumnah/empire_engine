@@ -84,6 +84,13 @@ function PlayState:init()
     self.marketplaceMenu = MarketplaceMenu()
     self.inventoryMenu = InventoryMenu()
     self.npcMenu = NpcMenu()
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    self.employeeMenu = EmployeeMenu()
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    self.equipmentMenu  = EquipmentMenu()
+    self.checklistMenu  = ChecklistMenu()
+    -- ====================================================================
 
     -- sleep / fast-forward state
     self.sleeping = false
@@ -92,6 +99,15 @@ function PlayState:init()
 
     -- save confirmation flash (seconds remaining)
     self.saveFlash = 0
+
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    self.autosaveTimer = 0      -- fires every 30 real seconds
+    self.autosaveFlash = 0      -- brief 'Autosaved' text flash
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    self.autoReorderFlash = 0   -- seconds remaining for auto-reorder notification
+    self.autoReorderMsg   = ''  -- last auto-reorder notification text
+    -- ====================================================================
 
     self.livingCostTimer = 0
 
@@ -144,6 +160,9 @@ function PlayState:init()
     self.player.pendingDeliveries = {}
     self.player.hunger = HUNGER_MAX
     self.player.thirst = THIRST_MAX
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    self.player.name = 'PLAYER'  -- default; overwritten in enter() from params or save data
+    -- ====================================================================
 
     self.player.inventory['yphone'] = 1
 
@@ -254,6 +273,13 @@ function PlayState:update(dt)
             self.player.cash = self.player.cash + profit
             self:updateLivingCosts(stepDt)
 
+            -- ================== claude_changes_2026-05-25-1330 ==================
+            for _, bus in ipairs(self.player.businesses) do
+                local msg = bus:checkAutoReorder(self.player)
+                if msg then self.autoReorderFlash = 2.5; self.autoReorderMsg = msg end
+            end
+            -- ====================================================================
+
             self.sleepDt = self.sleepDt + stepDt
             if self.sleepDt >= self.sleepMax then
                 self.sleeping = false
@@ -286,23 +312,53 @@ function PlayState:update(dt)
             self.pauseMenu:close()
         end
 
+        -- ================== claude_changes_2026-05-25-1228 ==================
         if self.pauseMenu.saveRequested then
+            local req = self.pauseMenu.saveRequested
             self.pauseMenu.saveRequested = nil
-            SaveLoad.save(self.player, self.world)
+            SaveLoad.save(self.player, self.world, req.slotId)
             self.saveFlash = 2.0
         end
 
         if self.pauseMenu.loadRequested then
+            local req = self.pauseMenu.loadRequested
             self.pauseMenu.loadRequested = nil
-            local data = SaveLoad.load()
+            local data = req.legacyLoad and SaveLoad.loadLegacy() or SaveLoad.load(req.slotId)
             if data then
                 gStateMachine:change('play', { saveData = data })
                 return
             end
         end
+        -- ====================================================================
 
         return
     end
+
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- employee menu sits on top of the business menu
+    if self.employeeMenu.active then
+        self.employeeMenu:update(dt)
+        return
+    end
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    -- equipment menu sits on top of the business menu (same layer as employee menu)
+    if self.equipmentMenu.active then
+        self.equipmentMenu:update(dt)
+        return
+    end
+    -- marketplace can be opened from businessMenu (W key); check before businessMenu block
+    -- so its inputs are captured even while businessMenu stays rendered underneath
+    if self.marketplaceMenu.active then
+        self.marketplaceMenu:update(dt)
+        return
+    end
+    -- checklist overlay opened with C from businessMenu
+    if self.checklistMenu.active then
+        self.checklistMenu:update(dt)
+        return
+    end
+    -- ====================================================================
 
     -- portfolio menu
     if love.keyboard.wasPressed('tab') and not self.npcMenu.active then
@@ -313,7 +369,10 @@ function PlayState:update(dt)
         if love.keyboard.wasPressed('escape') then
             self.businessMenu:toggle()
         else
-            self.businessMenu:update(dt, self.player)
+            -- ================== claude_changes_2026-05-25-1228 ==================
+            -- pass menus so BusinessMenu can open them via hotkeys
+            self.businessMenu:update(dt, self.player, self.employeeMenu, self.equipmentMenu, self.marketplaceMenu, self.checklistMenu)
+            -- ====================================================================
         end
         return
     end
@@ -391,9 +450,11 @@ function PlayState:update(dt)
     end
 
     -- normal gameplay
+    -- ================== claude_changes_2026-05-25-1228 ==================
     if love.keyboard.wasPressed('escape') then
-        love.event.quit()
+        self.pauseMenu:open()
     end
+    -- ====================================================================
 
     if love.keyboard.wasPressed('h') then
         self.showHelp = true
@@ -412,6 +473,16 @@ function PlayState:update(dt)
     end
 
     if self.saveFlash > 0 then self.saveFlash = self.saveFlash - dt end
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    if self.autosaveFlash > 0 then self.autosaveFlash = self.autosaveFlash - dt end
+    -- autosave every 30 real seconds; skipped during sleep fast-forward
+    self.autosaveTimer = self.autosaveTimer + dt
+    if self.autosaveTimer >= 30 then
+        self.autosaveTimer = 0
+        SaveLoad.autoSave(self.player, self.world)
+        self.autosaveFlash = 1.5
+    end
+    -- ====================================================================
     if self.rewardAnim then
         self.rewardAnim.timer = self.rewardAnim.timer + dt
         if self.rewardAnim.timer >= self.rewardAnim.duration then
@@ -458,12 +529,24 @@ function PlayState:update(dt)
         switchBiomeMusic(biomeName)
     end
 
-    self.world:update(dt)
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- simDt applies the player-selected speed multiplier to economic simulation
+    -- movement, animation, and rendering always use real dt
+    local simDt = dt * (self.pauseMenu.gameSpeed or 1)
+    -- ====================================================================
+    self.world:update(simDt)
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    if self.autoReorderFlash > 0 then self.autoReorderFlash = self.autoReorderFlash - dt end
+    for _, bus in ipairs(self.player.businesses) do
+        local msg = bus:checkAutoReorder(self.player)
+        if msg then self.autoReorderFlash = 2.5; self.autoReorderMsg = msg end
+    end
+    -- ====================================================================
     self.shmoozeSystem:update(dt, self.world.currentRoom)
 
-    self:updateLivingCosts(dt)
+    self:updateLivingCosts(simDt)
 
-    -- hunger and thirst decay over real time
+    -- hunger and thirst decay over real time (not sped up by game speed)
     self.player.hunger = math.max(0, self.player.hunger - HUNGER_DECAY_RATE * dt)
     self.player.thirst = math.max(0, self.player.thirst - THIRST_DECAY_RATE * dt)
 
@@ -479,7 +562,7 @@ function PlayState:update(dt)
     end
 
     -- tick pending deliveries; spawn box when timer expires
-    self:tickDeliveries(dt)
+    self:tickDeliveries(simDt)
 
     -- pick up market event notification and start banner
     local note = self.world.market.pendingNotification
@@ -565,8 +648,9 @@ function PlayState:update(dt)
 end
 
 function PlayState:enter(params)
-    -- no params = fresh new game; reset plot state and show intro
-    if not params then
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    -- no params OR isNewGame = fresh new game; reset plot state and show intro
+    if not params or params.isNewGame then
         plotBeatsSeen = {}
         for _, beat in ipairs(PLOT_BEATS) do
             if beat.trigger == 'start' then
@@ -576,6 +660,11 @@ function PlayState:enter(params)
             end
         end
     end
+    -- apply player name from new-game name entry
+    if params and params.playerName then
+        self.player.name = params.playerName
+    end
+    -- ====================================================================
 
     if params and params.freePlay then
         self.freePlay = true
@@ -624,6 +713,9 @@ function PlayState:enter(params)
         self.player.cash = d.player.cash or self.player.cash
         self.player.health = d.player.health or self.player.health
         self.player.displayCash = self.player.cash
+        -- ================== claude_changes_2026-05-25-1228 ==================
+        self.player.name = d.player.name or self.player.name
+        -- ====================================================================
     end
 
     if d.world_time then
@@ -643,9 +735,22 @@ function PlayState:enter(params)
         for _, bd in ipairs(d.businesses) do
             if BUSINESS_TYPES[bd.type] then
                 local bus = Business(BUSINESS_TYPES[bd.type])
-                bus.cash = bd.cash or bus.cash
+                bus.cash       = bd.cash       or bus.cash
                 bus.reputation = bd.reputation or 1.0
-                bus.age = bd.age or 0
+                bus.age        = bd.age        or 0
+                -- ================== claude_changes_2026-05-25-1330 ==================
+                -- restore fields that were missing from the original save restore
+                bus.scaleTier  = bd.scaleTier  or 1
+                if bd.stockLevel ~= nil then bus.stockLevel = bd.stockLevel end
+                if bd.employees  and #bd.employees > 0 then
+                    bus.employees = bd.employees
+                end
+                bus.autoReorderEnabled   = bd.autoReorderEnabled   or false
+                bus.autoReorderThreshold = bd.autoReorderThreshold or 0.10
+                bus.autoReorderQuantity  = bd.autoReorderQuantity  or 0.50
+                bus.reorderArmed         = true
+                bus.equipment            = bd.equipment or {}
+                -- ====================================================================
                 table.insert(self.player.businesses, bus)
             end
         end
@@ -689,6 +794,13 @@ function PlayState:render()
 
     -- menus render on top of everything
     self.businessMenu:render(self.player, self.world.market)
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    self.employeeMenu:render()
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    self.equipmentMenu:render()
+    self.checklistMenu:render()
+    -- ====================================================================
     self.businessOpenMenu:render()
     self.loanMenu:render()
     self.npcMenu:render()
@@ -720,6 +832,22 @@ function PlayState:render()
         love.graphics.printf('Saved!', 0, VIRTUAL_HEIGHT - 18, VIRTUAL_WIDTH, 'center')
         love.graphics.setColor(1, 1, 1, 1)
     end
+    -- ================== claude_changes_2026-05-25-1228 ==================
+    if self.autosaveFlash > 0 then
+        love.graphics.setFont(gFonts['small'])
+        love.graphics.setColor(0.5, 0.8, 1, math.min(1, self.autosaveFlash))
+        love.graphics.printf('Autosaved', 0, VIRTUAL_HEIGHT - 28, VIRTUAL_WIDTH, 'center')
+        love.graphics.setColor(1, 1, 1, 1)
+    end
+    -- ====================================================================
+    -- ================== claude_changes_2026-05-25-1330 ==================
+    if self.autoReorderFlash > 0 then
+        love.graphics.setFont(gFonts['small'])
+        love.graphics.setColor(0.55, 1, 0.75, math.min(1, self.autoReorderFlash))
+        love.graphics.printf(self.autoReorderMsg, 0, VIRTUAL_HEIGHT - 38, VIRTUAL_WIDTH, 'center')
+        love.graphics.setColor(1, 1, 1, 1)
+    end
+    -- ====================================================================
 
     if self.activePlotDialogue then self:renderPlotDialogue() end
 end
